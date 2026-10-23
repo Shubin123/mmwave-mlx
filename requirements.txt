@@ -1,0 +1,4 @@
+mlx>=0.29
+numpy
+pandas
+kagglehub

@@ -1,0 +1,6 @@
+.venv/
+data/
+__pycache__/
+._*
+.DS_Store
+artifacts/test_out.npy

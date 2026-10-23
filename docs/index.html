@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mmWave Radar PointNet</title>
+<meta name="description" content="Object classification and localization from 60 GHz mmWave radar point clouds. Trained with MLX on Apple silicon, served in the browser on WebGPU with a CPU worker fallback.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><path d=%22M8 15 1 4a10 10 0 0 1 14 0z%22 fill=%22%232a78d6%22/></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="wrap">
+  <p class="eyebrow">mmWave-Dataset · MLX · WebGPU</p>
+  <h1>Seeing forklifts and robots with radar</h1>
+  <p class="lede">An indoor-logistics radar dataset, synchronized with Vicon motion capture. A PointNet trained with
+    <a href="https://github.com/ml-explore/mlx">MLX</a> reads each radar scan and says <em>what</em> is in the room,
+    <em>where</em> it is and <em>which way it faces</em>. It runs right here in your browser on the GPU, and falls back to CPU workers.</p>
+  <div class="tiles" id="tiles"></div>
+</header>
+
+<main>
+<section class="wrap" id="explore">
+  <h2>Explore the recordings</h2>
+  <p class="sub">23 recordings, 4 objects, about 34k radar frames at 5 Hz. Pick one. The model scores every frame up front in a single batch, then the playback shows its predictions next to the Vicon ground truth.</p>
+  <div class="controls">
+    <label>Recording <select id="rec"></select></label>
+    <button id="play" class="btn" aria-label="Play">▶ Play</button>
+    <label class="grow">Frame <input id="frame" type="range" min="0" value="0"></label>
+    <span id="frameLabel" class="mono muted"></span>
+  </div>
+  <p id="runInfo" class="note"></p>
+  <div class="grid2">
+    <figure class="card">
+      <figcaption>Radar point cloud (sensor frame, last 0.6 s)<span class="legend"><i class="sw dop-neg"></i>approaching <i class="sw dop-0"></i>static <i class="sw dop-pos"></i>receding</span></figcaption>
+      <canvas id="bev" height="340"></canvas>
+    </figure>
+    <figure class="card">
+      <figcaption>Room (Vicon frame)<span class="legend"><i class="sw ring"></i>ground truth <i class="sw pred"></i>model</span></figcaption>
+      <canvas id="world" height="340"></canvas>
+    </figure>
+  </div>
+  <div class="grid2 lower">
+    <figure class="card">
+      <figcaption>Range profile over time (cursor = current frame)</figcaption>
+      <canvas id="profile" height="200"></canvas>
+    </figure>
+    <div class="card readout" id="readout"></div>
+  </div>
+</section>
+
+<section class="wrap" id="model">
+  <h2>The model</h2>
+  <p class="sub">Each input is the radar returns from the current frame plus the two before it (age is a feature), capped at the 256 strongest by SNR.
+    A shared per-point MLP lifts every return to 256 features, a max-pool makes it order-invariant, and a small head predicts four things at once.</p>
+  <div class="arch" aria-label="Architecture">
+    <div><b>≤256 points × 6</b><span>x, y, doppler, SNR, range, age</span></div><i>→</i>
+    <div><b>MLP 64 → 128 → 256</b><span>shared per point, ReLU</span></div><i>→</i>
+    <div><b>max-pool</b><span>over points</span></div><i>→</i>
+    <div><b>MLP 128 → 64 → 8</b><span>4 class logits · x, y · sin, cos yaw</span></div>
+  </div>
+  <div class="grid2">
+    <figure class="card"><figcaption>Training loss</figcaption><div class="chart" id="lossChart"></div></figure>
+    <figure class="card"><figcaption>Validation: median position error on moving objects (m)</figcaption><div class="chart" id="posChart"></div></figure>
+  </div>
+  <div class="grid2">
+    <figure class="card"><figcaption>Test confusion matrix (rows = truth)</figcaption><div id="confusion"></div></figure>
+    <figure class="card"><figcaption>Test results per recording</figcaption><div id="perRec" class="scroll"></div></figure>
+  </div>
+  <div class="callout">
+    <b>How to read these numbers.</b> Each recording is split in time: the first 70% is for training, then 15% validation, then 15% test, with a gap so no window spans two splits.
+    In the <em>static</em> recordings the object never moves, so their near-perfect pose scores mostly show that the model recognizes the scene. The <em>moving</em> recordings are the real localization test,
+    because their test segments reach positions and headings the model saw less of in training.
+  </div>
+</section>
+
+<section class="wrap" id="throughput">
+  <h2>Throughput in your browser</h2>
+  <p class="sub">The WebGPU backend runs the whole network as <b>one fused compute shader</b>. Each workgroup handles one frame window, and points stream through workgroup memory 16 at a time, so per-point activations never reach VRAM and padding never gets computed.
+    Without WebGPU, the same math runs on a pool of Web Workers.</p>
+  <div class="controls">
+    <label>Backend <select id="backend">
+      <option value="auto">Auto (WebGPU → CPU)</option>
+      <option value="webgpu">WebGPU only</option>
+      <option value="cpu">CPU workers</option>
+    </select></label>
+    <button id="benchBtn" class="btn primary">Run benchmark</button>
+    <span id="engineBadge" class="badge"></span>
+  </div>
+  <p id="parity" class="note"></p>
+  <figure class="card"><figcaption>Frames per second by batch size (higher is better)</figcaption><div id="benchChart"></div></figure>
+</section>
+
+<section class="wrap" id="reproduce">
+  <h2>Reproduce</h2>
+<pre><code>git clone https://github.com/Shubin123/mmwave-mlx && cd mmwave-mlx
+uv venv -p 3.12 && uv pip install -r requirements.txt
+python -m mmwave.prep          # downloads the 23 synchronized CSVs (~215 MB) from Kaggle
+python -m mmwave.train         # ~4 min on an M-series Mac
+python -m mmwave.export        # writes docs/model and docs/data
+node tests/parity.mjs          # JS kernel vs MLX outputs
+python -m http.server -d docs  # open http://localhost:8000</code></pre>
+</section>
+</main>
+
+<footer class="wrap">
+  <p>Data: <a href="https://www.kaggle.com/datasets/sahilrajpurkar/mmwave-dataset">mmWave-Dataset</a> by Sahil Rajpurkar (Kaggle). This page uses a quantized copy of its synchronized radar/Vicon subset for demonstration.
+  Code: <a href="https://github.com/Shubin123/mmwave-mlx">github.com/Shubin123/mmwave-mlx</a>.</p>
+</footer>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
